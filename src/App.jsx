@@ -5,7 +5,19 @@ import html2canvas from 'html2canvas'
 
 function App() {
   const [session, setSession] = useState(null)
-  const [notes, setNotes] = useState([])
+  
+  // ✅ FIX 1: Initialize State directly from LocalStorage (Survives App Close/Safari Clear)
+  const [notes, setNotes] = useState(() => {
+    const saved = localStorage.getItem('MY_NOTES_CACHE')
+    return saved ? JSON.parse(saved) : []
+  })
+
+  // ✅ FIX 2: Initialize Categories from LocalStorage
+  const [categories, setCategories] = useState(() => {
+    const saved = localStorage.getItem('MY_CATS_CACHE')
+    return saved ? JSON.parse(saved) : ['General', 'Work', 'Device Repair', 'Football', 'Personal']
+  })
+
   const [content, setContent] = useState('')
   const [category, setCategory] = useState('General')
   const [imageFile, setImageFile] = useState(null)
@@ -23,7 +35,8 @@ function App() {
   const [previewImage, setPreviewImage] = useState(null)
   const [historyNotes, setHistoryNotes] = useState([])
   const [viewingHistoryId, setViewingHistoryId] = useState(null)
-  const [categories, setCategories] = useState(['General']) // Default
+  
+  // 🔄 Categories Initial State
   const [newCatName, setNewCatName] = useState('')
   const [isManagingCats, setIsManagingCats] = useState(false)
   const [showTrash, setShowTrash] = useState(false)
@@ -31,6 +44,19 @@ function App() {
   const [showLogs, setShowLogs] = useState(false)
   const [view, setView] = useState('login')
   const [viewingNote, setViewingNote] = useState(null)
+  
+  // 🌐 Internet Status
+  const [isOnline, setIsOnline] = useState(navigator.onLine)
+
+  useEffect(() => {
+    const handleStatusChange = () => setIsOnline(navigator.onLine)
+    window.addEventListener('online', handleStatusChange)
+    window.addEventListener('offline', handleStatusChange)
+    return () => {
+      window.removeEventListener('online', handleStatusChange)
+      window.removeEventListener('offline', handleStatusChange)
+    }
+  }, [])
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => setSession(session))
@@ -40,13 +66,13 @@ function App() {
     })
   }, [])
 
-  // 🔄 UPDATED: Session ရတာနဲ့ Notes ရော Categories ပါ Fetch လုပ်မည်
   useEffect(() => {
-    if (session) {
+    // Only fetch from Supabase if we are ONLINE and have a Session
+    if (session && isOnline) {
       fetchNotes()
       fetchCategories()
     }
-  }, [session, showTrash])
+  }, [session, showTrash, isOnline]) // Re-fetch when these change
 
   const formatDate = (dateString) => {
     if (!dateString) return "N/A";
@@ -57,21 +83,29 @@ function App() {
     }).replace(',', ' •');
   };
 
-  // 📖 NEW: Categories များကို Database မှ ခေါ်ယူခြင်း
+  // 🔄 FIXED: Default Categories နှင့် Database Categories ကို ပေါင်းစည်းခြင်း
   async function fetchCategories() {
-    const { data, error } = await supabase.from('categories').select('name').order('name')
-    if (data && data.length > 0) {
-      // General ကို အမြဲတမ်း ပထမဆုံးမှာ ထားရန်
-      const names = data.map(c => c.name)
-      if (!names.includes('General')) names.unshift('General')
-      setCategories(names)
+    // Don't fetch if offline, use existing state
+    if (!navigator.onLine) return;
+
+    const { data } = await supabase.from('categories').select('name').order('name')
+    const systemDefaults = ['General', 'Work', 'Device Repair', 'Football', 'Personal']
+    
+    if (data) {
+      const dbCats = data.map(c => c.name)
+      // Array.from(new Set(...)) ကိုသုံးပြီး Duplicate များကို ဖယ်ရှားကာ ပေါင်းစည်းသည်
+      const combined = Array.from(new Set([...systemDefaults, ...dbCats]))
+      setCategories(combined)
+      // ✅ SAVE TO CACHE
+      localStorage.setItem('MY_CATS_CACHE', JSON.stringify(combined))
     } else {
-      setCategories(['General', 'Work', 'Device Repair', 'Football', 'Personal'])
+      setCategories(systemDefaults)
     }
   }
 
-  // 📖 NEW: Category အသစ်ကို Database ထဲသို့ ထည့်ခြင်း
   const addCategory = async () => {
+    if (!isOnline) return alert("Offline: Cannot add categories.")
+
     if (newCatName && !categories.includes(newCatName)) {
       setLoading(true)
       const { error } = await supabase.from('categories').insert([{ name: newCatName, user_id: session.user.id }])
@@ -84,9 +118,12 @@ function App() {
     }
   }
 
-  // 📖 NEW: Category ကို Database မှ ဖျက်ခြင်း
   const deleteCategory = async (catToDelete) => {
-    if (catToDelete === 'General') return alert("General cannot be deleted")
+    if (!isOnline) return alert("Offline: Cannot delete categories.")
+
+    const systemDefaults = ['General', 'Work', 'Device Repair', 'Football', 'Personal']
+    if (systemDefaults.includes(catToDelete)) return alert("Default Categories များကို ဖျက်၍မရပါ")
+    
     if (confirm(`Delete category "${catToDelete}"?`)) {
       setLoading(true)
       const { error } = await supabase.from('categories').delete().eq('name', catToDelete)
@@ -97,36 +134,51 @@ function App() {
   }
 
   async function logActivity(noteId, action, details) {
+    if (!isOnline) return;
     await supabase.from('activity_logs').insert([{
       note_id: noteId, action, details, user_id: session.user.id
     }])
   }
 
   async function fetchLogs() {
+    if (!isOnline) return alert("Logs require internet.")
     const { data } = await supabase.from('activity_logs').select('*').order('created_at', { ascending: false }).limit(20)
     setActivityLogs(data || [])
     setShowLogs(true)
   }
 
   async function fetchNotes() {
+    if (!navigator.onLine) return; // If offline, keep showing what we have in cache
+
     const { data } = await supabase.from('notes')
       .select('*')
       .eq('is_trash', showTrash)
       .order('is_pinned', { ascending: false })
       .order('created_at', { ascending: false })
-    setNotes(data || [])
+    
+    if (data) {
+      setNotes(data || [])
+      // ✅ SAVE TO CACHE (This key changes based on Trash/Not Trash to allow simple switching)
+      // Ideally we cache everything, but to keep your logic:
+      if (!showTrash) {
+          // If we are viewing main notes, save them to the MAIN cache
+          localStorage.setItem('MY_NOTES_CACHE', JSON.stringify(data))
+      }
+    }
   }
 
   async function togglePin(note) {
+    if (!isOnline) return alert("Offline: Cannot pin.")
     const { error } = await supabase.from('notes').update({ is_pinned: !note.is_pinned }).eq('id', note.id)
     if (error) alert(error.message)
     else {
-      logActivity(note.id, !note.is_pinned ? 'Pinned' : 'Unpinned', `Note status updated`)
+      logActivity(note.id, !note.is_pinned ? 'Pinned' : 'Unpinned', `Status updated`)
       fetchNotes()
     }
   }
 
   async function fetchHistory(noteId) {
+    if (!isOnline) return alert("History requires internet.")
     const { data } = await supabase.from('note_history').select('*').eq('note_id', noteId).order('created_at', { ascending: false })
     setHistoryNotes(data || [])
     setViewingHistoryId(noteId)
@@ -134,6 +186,10 @@ function App() {
 
   const handleLogout = async () => {
     try {
+      // ✅ CLEAR CACHE ON LOGOUT so next user doesn't see your notes
+      localStorage.removeItem('MY_NOTES_CACHE');
+      localStorage.removeItem('MY_CATS_CACHE');
+      
       const { error } = await supabase.auth.signOut()
       if (error) { localStorage.clear(); window.location.reload(); }
     } catch (err) { localStorage.clear(); window.location.reload(); }
@@ -141,6 +197,7 @@ function App() {
 
   const handleForgotPassword = async (e) => {
     e.preventDefault()
+    if (!isOnline) return alert("Offline.")
     setLoading(true)
     const { error } = await supabase.auth.resetPasswordForEmail(email, {
       redirectTo: `${window.location.origin}`, 
@@ -152,10 +209,11 @@ function App() {
 
   const handleUpdatePassword = async (e) => {
     e.preventDefault()
+    if (!isOnline) return alert("Offline.")
     setLoading(true)
     const { error } = await supabase.auth.updateUser({ password: password })
     if (error) alert(error.message)
-    else { alert("Password updated successfully."); setView('login'); }
+    else { alert("Password updated."); setView('login'); }
     setLoading(false)
   }
 
@@ -192,15 +250,17 @@ function App() {
 
   const handleLogin = async (e) => {
     e.preventDefault()
+    if (!isOnline) return alert("Cannot login while offline.")
     const { error } = await supabase.auth.signInWithPassword({ email, password })
     if (error) alert(error.message)
   }
 
   const handleSignUp = async (e) => {
     e.preventDefault()
+    if (!isOnline) return alert("Cannot signup while offline.")
     const { error } = await supabase.auth.signUp({ email, password })
     if (error) alert(error.message)
-    else alert("Sign Up successful. Check email.")
+    else alert("Check your email for confirmation.")
   }
 
   const renderContent = (text) => {
@@ -215,6 +275,10 @@ function App() {
 
   async function handleSubmit(e) {
     e.preventDefault()
+    
+    // 🛑 Offline Guard
+    if (!isOnline) return alert("You are OFFLINE. Cannot save edits.")
+
     if (!content.trim()) return
     setLoading(true)
     try {
@@ -250,6 +314,7 @@ function App() {
   }
 
   async function moveToTrash(id) {
+    if (!isOnline) return alert("Offline: Cannot trash.")
     if (confirm('Move to Trash?')) {
       await supabase.from('notes').update({ is_trash: true }).eq('id', id)
       logActivity(id, 'Deleted', 'To Trash')
@@ -258,12 +323,14 @@ function App() {
   }
 
   async function restoreFromTrash(id) {
+    if (!isOnline) return alert("Offline: Cannot restore.")
     await supabase.from('notes').update({ is_trash: false }).eq('id', id)
     logActivity(id, 'Restored', 'From Trash')
     fetchNotes()
   }
 
   async function permanentDelete(id) {
+    if (!isOnline) return alert("Offline: Cannot delete.")
     if (confirm('Permanently delete?')) {
       await supabase.from('notes').delete().eq('id', id)
       fetchNotes()
@@ -271,6 +338,7 @@ function App() {
   }
 
   async function undoEdit(noteId) {
+    if (!isOnline) return alert("Offline: Cannot undo.")
     const { data: latestHistory } = await supabase.from('note_history')
       .select('*').eq('note_id', noteId).order('created_at', { ascending: false }).limit(1).single()
     if (latestHistory) {
@@ -303,7 +371,10 @@ function App() {
     return matchesSearch && matchesCategory
   })
 
-  if (!session && view !== 'forgot' && view !== 'reset') {
+  // ✅ OFFLINE BYPASS: If no session, but we have notes in cache, show the app!
+  const hasLocalNotes = notes.length > 0;
+
+  if (!session && !hasLocalNotes && view !== 'forgot' && view !== 'reset') {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-950 p-6 text-slate-200 text-center uppercase font-black">
         <div className="w-full max-w-md bg-slate-900 border border-slate-800 p-8 rounded-3xl shadow-2xl animate-in zoom-in duration-300">
@@ -311,7 +382,9 @@ function App() {
           <form className="space-y-4">
             <input className="w-full bg-slate-800 border border-slate-700 p-3 rounded-xl outline-none" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} />
             <input className="w-full bg-slate-800 border border-slate-700 p-3 rounded-xl outline-none" type="password" placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} />
-            <button onClick={handleLogin} className="w-full bg-emerald-500 text-slate-950 py-3 rounded-xl font-bold">Login</button>
+            <button onClick={handleLogin} disabled={!isOnline} className={`w-full py-3 rounded-xl font-bold ${isOnline ? 'bg-emerald-500 text-slate-950' : 'bg-slate-700 text-slate-400 cursor-not-allowed'}`}>
+                {isOnline ? 'Login' : 'Offline (No Data)'}
+            </button>
             <div className="flex justify-between items-center mt-4">
               <button type="button" onClick={() => setView('forgot')} className="text-slate-500 text-[10px] underline uppercase">Forgot Password?</button>
               <button type="button" onClick={handleSignUp} className="text-emerald-500 text-[10px] underline uppercase">Create Account</button>
@@ -332,13 +405,13 @@ function App() {
           {view === 'forgot' ? (
             <form className="space-y-4">
               <input className="w-full bg-slate-800 border border-slate-700 p-3 rounded-xl outline-none" placeholder="Your Email" value={email} onChange={e => setEmail(e.target.value)} />
-              <button onClick={handleForgotPassword} disabled={loading} className="w-full bg-emerald-500 text-slate-950 py-3 rounded-xl font-bold">{loading ? 'Sending...' : 'Send Link'}</button>
+              <button onClick={handleForgotPassword} disabled={loading || !isOnline} className="w-full bg-emerald-500 text-slate-950 py-3 rounded-xl font-bold">{loading ? 'Sending...' : 'Send Link'}</button>
               <button type="button" onClick={() => setView('login')} className="text-slate-500 text-[10px] underline uppercase block mx-auto">Back to Login</button>
             </form>
           ) : (
             <form className="space-y-4">
               <input className="w-full bg-slate-800 border border-slate-700 p-3 rounded-xl outline-none" type="password" placeholder="New Password" value={password} onChange={e => setPassword(e.target.value)} />
-              <button onClick={handleUpdatePassword} disabled={loading} className="w-full bg-emerald-500 text-slate-950 py-3 rounded-xl font-bold">{loading ? 'Updating...' : 'Update Password'}</button>
+              <button onClick={handleUpdatePassword} disabled={loading || !isOnline} className="w-full bg-emerald-500 text-slate-950 py-3 rounded-xl font-bold">{loading ? 'Updating...' : 'Update Password'}</button>
             </form>
           )}
         </div>
@@ -349,10 +422,20 @@ function App() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 p-4 md:p-12">
       <div className="max-w-5xl mx-auto">
-        <header className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 bg-slate-900/40 backdrop-blur-xl p-4 md:p-6 rounded-3xl border border-slate-800 gap-4 shadow-xl">
-          <div className="w-full sm:w-auto">
+        <header className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 bg-slate-900/40 backdrop-blur-xl p-4 md:p-6 rounded-3xl border border-slate-800 gap-4 shadow-xl relative overflow-hidden">
+          
+          {/* OFFLINE BANNER */}
+          {!isOnline && (
+            <div className="absolute top-0 left-0 w-full bg-red-600/20 text-red-400 text-center text-[10px] font-bold py-1 uppercase tracking-widest border-b border-red-500/50">
+              ⚠️ Offline Mode - View Only
+            </div>
+          )}
+
+          <div className="w-full sm:w-auto mt-4 sm:mt-0">
             <h1 className="text-xl md:text-2xl font-black text-emerald-400 uppercase tracking-tighter">Premium Notes v2</h1>
-            <p className="text-[10px] text-slate-500 uppercase tracking-widest truncate max-w-[200px] sm:max-w-none">{session.user.email}</p>
+            <p className="text-[10px] text-slate-500 uppercase tracking-widest truncate max-w-[200px] sm:max-w-none">
+                {session?.user?.email || "Offline Mode"}
+            </p>
           </div>
           <div className="flex gap-2 w-full sm:w-auto overflow-x-auto pb-2 sm:pb-0">
             <button onClick={fetchLogs} className="bg-slate-800 text-slate-400 px-4 py-2 rounded-full text-[10px] font-bold border border-slate-700">LOGS</button>
@@ -364,7 +447,6 @@ function App() {
           </div>
         </header>
 
-        {/* ⚙ Categories Manager */}
         <div className="mb-6">
           <button onClick={() => setIsManagingCats(!isManagingCats)} className="text-[10px] bg-slate-800 text-emerald-400 px-3 py-1 rounded-lg border border-slate-700 uppercase font-bold">
             {isManagingCats ? '✖ Close Manager' : '⚙ Manage Categories'}
@@ -379,7 +461,10 @@ function App() {
                 {categories.map(cat => (
                   <div key={cat} className="flex items-center gap-2 bg-slate-800 px-3 py-1.5 rounded-full border border-slate-700 text-[10px]">
                     <span className="font-bold">{cat}</span>
-                    {cat !== 'General' && <button onClick={() => deleteCategory(cat)} className="text-red-500 font-black">×</button>}
+                    {/* Default Cats များအား ဖျက်၍မရအောင် ကန့်သတ်ခြင်း */}
+                    {!['General', 'Work', 'Device Repair', 'Football', 'Personal'].includes(cat) && 
+                      <button onClick={() => deleteCategory(cat)} className="text-red-500 font-black">×</button>
+                    }
                   </div>
                 ))}
               </div>
@@ -396,20 +481,21 @@ function App() {
                 {categories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
               </select>
             </div>
-            <form onSubmit={handleSubmit} className="mb-8 bg-slate-900 p-6 rounded-3xl border border-slate-800 shadow-2xl">
-              <textarea className="w-full bg-slate-800 p-4 rounded-xl outline-none mb-4 min-h-[100px]" placeholder="Write a note..." value={content} onChange={(e) => setContent(e.target.value)} />
+            {/* Input Form disabled if offline */}
+            <form onSubmit={handleSubmit} className={`mb-8 bg-slate-900 p-6 rounded-3xl border border-slate-800 shadow-2xl ${!isOnline ? 'opacity-50 pointer-events-none' : ''}`}>
+              <textarea className="w-full bg-slate-800 p-4 rounded-xl outline-none mb-4 min-h-[100px]" placeholder={isOnline ? "Write a note..." : "Offline: Read Only Mode"} value={content} onChange={(e) => setContent(e.target.value)} disabled={!isOnline} />
               <div className="flex flex-wrap gap-4 items-center justify-between">
                 <div className="flex flex-wrap gap-3 items-center">
-                  <select className="bg-slate-800 p-2.5 rounded-xl text-xs outline-none border border-slate-700" value={category} onChange={(e) => setCategory(e.target.value)}>
+                  <select className="bg-slate-800 p-2.5 rounded-xl text-xs outline-none border border-slate-700" value={category} onChange={(e) => setCategory(e.target.value)} disabled={!isOnline}>
                     {categories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
                   </select>
-                  <input type="password" placeholder="PIN" className="bg-slate-800 p-2.5 rounded-xl text-[10px] outline-none border border-slate-700 w-24" value={notePassword} onChange={(e) => setNotePassword(e.target.value)} />
+                  <input type="password" placeholder="PIN" className="bg-slate-800 p-2.5 rounded-xl text-[10px] outline-none border border-slate-700 w-24" value={notePassword} onChange={(e) => setNotePassword(e.target.value)} disabled={!isOnline} />
                   <label className="cursor-pointer flex items-center gap-2 bg-emerald-500/10 px-4 py-2.5 rounded-xl border border-emerald-500/30">
                     <span className="text-[10px] font-bold text-emerald-400 uppercase">{imageFile ? "OK" : "PHOTO"}</span>
-                    <input type="file" accept="image/*" onChange={(e) => setImageFile(e.target.files[0])} className="hidden" />
+                    <input type="file" accept="image/*" onChange={(e) => setImageFile(e.target.files[0])} className="hidden" disabled={!isOnline} />
                   </label>
                 </div>
-                <button type="submit" disabled={loading} className="bg-emerald-500 text-slate-950 font-black px-10 py-2.5 rounded-xl text-xs uppercase shadow-lg">
+                <button type="submit" disabled={loading || !isOnline} className="bg-emerald-500 text-slate-950 font-black px-10 py-2.5 rounded-xl text-xs uppercase shadow-lg">
                   {loading ? '...' : (editingNote ? 'Update' : 'Post')}
                 </button>
               </div>
@@ -473,7 +559,7 @@ function App() {
         </div>
       </div>
 
-      {/* 📖 FULL NOTE VIEW MODAL */}
+      {/* 📖 FULL VIEW MODAL */}
       {viewingNote && (
         <div className="fixed inset-0 z-[110] bg-black/95 flex items-center justify-center p-4 backdrop-blur-md overflow-hidden" onClick={() => setViewingNote(null)}>
           <div className="bg-slate-900 border border-slate-800 w-full max-w-2xl max-h-[85vh] rounded-3xl flex flex-col shadow-2xl animate-in zoom-in duration-300" onClick={e => e.stopPropagation()}>
@@ -495,7 +581,7 @@ function App() {
         </div>
       )}
 
-      {/* Modals for History & Logs */}
+      {/* Modals for History, Logs, Image Preview */}
       {viewingHistoryId && (
         <div className="fixed inset-0 z-[110] bg-black/95 flex items-center justify-center p-4 backdrop-blur-md overflow-hidden" onClick={() => setViewingHistoryId(null)}>
           <div className="bg-slate-900 border border-slate-800 w-full max-w-4xl max-h-[80vh] rounded-3xl flex flex-col shadow-2xl animate-in zoom-in duration-300" onClick={e => e.stopPropagation()}>
