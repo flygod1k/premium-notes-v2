@@ -1,0 +1,49 @@
+@import "tailwindcss";
+
+/* --- Existing App Styles --- */
+body {
+  @apply bg-slate-950 text-slate-200;
+  margin: 0;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+/* Scrollbar အား အလှဆင်ခြင်း */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #020617;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 10px;
+}
+
+/* --- PDF Export Compatibility Fix (Aggressive Version) --- */
+/* html2canvas မှ modern color functions (oklch, oklab) များကို parse မလုပ်နိုင်သောပြဿနာအတွက် ဖြေရှင်းချက် */
+
+.pdf-export-mode {
+  background-color: #020617 !important; /* bg-slate-950 HEX value */
+  color: #f8fafc !important;            /* text-slate-50 HEX value */
+  
+  /* Tailwind v4 CSS Variables များကို standard HEX ဖြင့် override လုပ်ခြင်း */
+  --color-slate-950: #020617 !important;
+  --color-slate-900: #0f172a !important;
+  --color-slate-800: #1e293b !important;
+  --color-emerald-400: #34d399 !important;
+  --color-emerald-500: #10b981 !important;
+}
+
+/* PDF ထဲရှိ Card များအတွက် standard background နှင့် border colors များ */
+.pdf-export-mode .bg-slate-900 {
+  background-color: #0f172a !important;
+}
+
+.pdf-export-mode .border-slate-800 {
+  border-color: #1e293b !important;
+}
+
+/* PDF ထဲရှိ စာသားများ အကုန်လုံးကို standard color ပြောင်းလဲခြင်း */
+.pdf-export-mode * {
+  color: #f8fafc !important;
+}
